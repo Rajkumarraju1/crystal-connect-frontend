@@ -1,0 +1,8 @@
+/* minimal styling, feel free to plug Tailwind if you like */
+html,body,#root{height:100%;margin:0;font-family:Inter,system-ui,Arial}
+.container{max-width:900px;margin:0 auto;padding:16px}
+.videoGrid{display:flex;gap:10px;flex-wrap:wrap}
+video{width:100%;max-width:430px;background:#000;border-radius:8px}
+.controls{margin-top:12px}
+button{padding:10px 14px;border-radius:8px;border:0;background:#111;color:#fff;cursor:pointer;margin-right:8px}
+.chat{border:1px solid #ddd;padding:8px;border-radius:8px;max-width:430px}
