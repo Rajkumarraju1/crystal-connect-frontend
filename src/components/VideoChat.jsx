@@ -1,64 +1,49 @@
-import React, { useEffect, useRef, useState } from "react";
-import io from "socket.io-client"; 
+ import React, { useEffect, useRef, useState } from "react";
+import io from "socket.io-client";
 import "../glass.css";
 
-
 const SIGNALING_URL = "https://gastric-swan-crystalconnect-975fa1db.koyeb.app";
-
-
 
 export default function VideoChat() {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+
   const pcRef = useRef(null);
   const socketRef = useRef(null);
   const roomRef = useRef(null);
   const partnerRef = useRef(null);
-  const isInitiatorRef = useRef(false); // whether this client should create the offer
+  const isInitiatorRef = useRef(false);
 
   const [status, setStatus] = useState("idle");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
+  // ------------------ SOCKET SETUP ------------------
   useEffect(() => {
     socketRef.current = io(SIGNALING_URL, { transports: ["websocket"] });
 
     socketRef.current.on("connect", () => {
-      console.log("Connected:", socketRef.current.id);
       joinQueue();
     });
 
     socketRef.current.on("waiting", () => setStatus("waiting"));
 
-    // matched will include partner id; we determine initiator client-side
     socketRef.current.on("matched", ({ roomId, partner }) => {
       roomRef.current = roomId;
       partnerRef.current = partner;
-
-      // decide initiator deterministically so only one side creates the offer
-      // smaller socket id string will initiate
-      isInitiatorRef.current = socketRef.current.id < partnerRef.current;
+      isInitiatorRef.current = socketRef.current.id < partner;
 
       setStatus("matched");
-      // startCall will use isInitiatorRef to decide whether to createOffer
       startCall(isInitiatorRef.current);
     });
 
     socketRef.current.on("signal", async ({ from, data }) => {
-      // data might be an offer/answer (SDP) or ICE candidate (candidate property)
+      if (!pcRef.current) await startCall(false);
+      if (!data) return;
+
       try {
-        // ensure we have a pc
-        if (!pcRef.current) {
-          // non-initiator should start the pc if not initiated yet
-          await startCall(false);
-        }
-
-        if (!data) return;
-
         if (data.type === "offer") {
-          // set remote offer and only non-initiator answers
-          await pcRef.current.setRemoteDescription(new RTCSessionDescription(data));
-          // create answer
+          await pcRef.current.setRemoteDescription(data);
           const answer = await pcRef.current.createAnswer();
           await pcRef.current.setLocalDescription(answer);
 
@@ -68,20 +53,12 @@ export default function VideoChat() {
             data: pcRef.current.localDescription,
           });
         } else if (data.type === "answer") {
-          // remote answered our offer
-          await pcRef.current.setRemoteDescription(new RTCSessionDescription(data));
-        } else if (data.candidate || data.candidate === "") {
-          // ICE candidate message
-          try {
-            // Normalize candidate object (some libs send candidate object directly)
-            const cand = new RTCIceCandidate(data);
-            await pcRef.current.addIceCandidate(cand);
-          } catch (err) {
-            console.warn("addIceCandidate error:", err);
-          }
+          await pcRef.current.setRemoteDescription(data);
+        } else if (data.candidate) {
+          await pcRef.current.addIceCandidate(data);
         }
-      } catch (err) {
-        console.error("Error handling signal:", err);
+      } catch (error) {
+        console.log("Signal error:", error);
       }
     });
 
@@ -89,43 +66,39 @@ export default function VideoChat() {
       setMessages((m) => [...m, { from: "partner", text: message }]);
     });
 
-    socketRef.current.on("partner-skipped", () => {
-      cleanupCall();
-      setStatus("partner-skipped");
-      setTimeout(joinQueue, 1000);
-    });
-
     socketRef.current.on("partner-disconnected", () => {
       cleanupCall();
       setStatus("partner-disconnected");
-      setTimeout(joinQueue, 1000);
+      setTimeout(joinQueue, 1500);
     });
 
-    return () => {
-      try {
-        if (socketRef.current) socketRef.current.disconnect();
-      } catch {}
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    socketRef.current.on("partner-skipped", () => {
+      cleanupCall();
+      setStatus("partner-skipped");
+      setTimeout(joinQueue, 1500);
+    });
+
+    return () => socketRef.current.disconnect();
   }, []);
 
+  // ------------------ MEDIA SETUP ------------------
   async function getMedia() {
-  return await navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 30 }
-    },
-    audio: true
-  });
-}
+    return await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 },
+      },
+      audio: true,
+    });
+  }
 
-
+  // ------------------ WEBRTC CALL SETUP ------------------
   async function startCall(isInitiator) {
-    // If there's already a pc, clean it first to avoid stale states
     if (pcRef.current) {
-      try { pcRef.current.close(); } catch {}
-      pcRef.current = null;
+      try {
+        pcRef.current.close();
+      } catch {}
     }
 
     pcRef.current = new RTCPeerConnection({
@@ -144,7 +117,6 @@ export default function VideoChat() {
       ],
     });
 
-    // Forward local ICE candidates to partner
     pcRef.current.onicecandidate = (e) => {
       if (e.candidate) {
         socketRef.current.emit("signal", {
@@ -155,45 +127,36 @@ export default function VideoChat() {
       }
     };
 
-    // set remote stream when arrives
     pcRef.current.ontrack = (e) => {
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0];
+      remoteVideoRef.current.srcObject = e.streams[0];
     };
 
-    // get and attach local tracks
-    const localStream = await getMedia();
-    if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
-    localStream.getTracks().forEach((track) => pcRef.current.addTrack(track, localStream));
+    const stream = await getMedia();
+    localVideoRef.current.srcObject = stream;
 
-    // Only the initiator creates and sends the offer
+    stream.getTracks().forEach((track) =>
+      pcRef.current.addTrack(track, stream)
+    );
+
     if (isInitiator) {
-      try {
-        const offer = await pcRef.current.createOffer();
-        await pcRef.current.setLocalDescription(offer);
+      const offer = await pcRef.current.createOffer();
+      await pcRef.current.setLocalDescription(offer);
 
-        socketRef.current.emit("signal", {
-          roomId: roomRef.current,
-          to: partnerRef.current,
-          data: pcRef.current.localDescription,
-        });
-      } catch (err) {
-        console.error("Error creating/sending offer:", err);
-      }
+      socketRef.current.emit("signal", {
+        roomId: roomRef.current,
+        to: partnerRef.current,
+        data: offer,
+      });
     }
   }
 
+  // ------------------ UTILITIES ------------------
   function cleanupCall() {
-    try {
-      if (pcRef.current) pcRef.current.close();
-    } catch (e) {}
+    if (pcRef.current) pcRef.current.close();
     pcRef.current = null;
 
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-
-    roomRef.current = null;
-    partnerRef.current = null;
-    isInitiatorRef.current = false;
+    localVideoRef.current.srcObject = null;
+    remoteVideoRef.current.srcObject = null;
   }
 
   function joinQueue() {
@@ -201,24 +164,10 @@ export default function VideoChat() {
     socketRef.current.emit("join");
   }
 
-  function handleSkip() {
-    if (!roomRef.current) return;
-    socketRef.current.emit("skip", { roomId: roomRef.current });
-    cleanupCall();
-    setStatus("skipped");
-  }
-
-  function handleDisconnect() {
-    try { if (socketRef.current) socketRef.current.disconnect(); } catch {}
-    cleanupCall();
-    setStatus("idle");
-  }
-
   function sendMessage() {
     if (!input.trim()) return;
 
     setMessages((m) => [...m, { from: "me", text: input }]);
-
     socketRef.current.emit("chat-message", {
       roomId: roomRef.current,
       message: input,
@@ -227,80 +176,77 @@ export default function VideoChat() {
     setInput("");
   }
 
-   return (
-  <div className="container">
+  return (
+    <div className="videochat-wrapper">
 
-    <div className="status-text">
-      Status: <strong>{status}</strong>
-    </div>
-
-    {/* Video Section */}
-    <div className="glass-card" style={{ marginBottom: 20 }}>
-      <h2 style={{ marginBottom: 10 }}>Video Chat</h2>
-
-      <div style={{ display: "flex", gap: 20 }}>
-        
-        <div style={{ flex: 1 }}>
-          <div style={{ marginBottom: 8 }}>Local</div>
-          <div className="video-box">
-            <video ref={localVideoRef} autoPlay muted playsInline></video>
-          </div>
-        </div>
-
-        <div style={{ flex: 1 }}>
-          <div style={{ marginBottom: 8 }}>Remote</div>
-          <div className="video-box">
-            <video ref={remoteVideoRef} autoPlay playsInline></video>
-          </div>
-        </div>
+      <div className="status-text">
+        Status: <strong>{status}</strong>
       </div>
 
-      {/* Controls */}
-      <div style={{ marginTop: 20, display: "flex", gap: 10 }}>
-        <button className="btn" onClick={joinQueue}>Join</button>
-        <button className="btn" onClick={handleSkip}>Skip</button>
-        <button className="btn red" onClick={handleDisconnect}>Disconnect</button>
-      </div>
-    </div>
+      {/* VIDEO SECTION */}
+      <div className="glass-card video-section">
 
-    {/* Chat + Notes */}
-    <div style={{ display: "flex", gap: 20 }}>
+        <h2 className="section-title">Video Chat</h2>
 
-      {/* Chat Panel */}
-      <div style={{ flex: 1 }}>
-        <h3>Chat</h3>
-
-        <div className="chat-panel">
-          {messages.map((m, i) => (
-            <div key={i} style={{ textAlign: m.from === "me" ? "right" : "left", marginBottom: 8 }}>
-              <small style={{ opacity: 0.7 }}>{m.from}:</small>
-              <div>{m.text}</div>
+        <div className="video-grid">
+          <div className="video-block">
+            <span className="video-label">Local</span>
+            <div className="video-box">
+              <video ref={localVideoRef} autoPlay muted playsInline></video>
             </div>
-          ))}
+          </div>
+
+          <div className="video-block">
+            <span className="video-label">Remote</span>
+            <div className="video-box">
+              <video ref={remoteVideoRef} autoPlay playsInline></video>
+            </div>
+          </div>
         </div>
 
-        <div className="chat-input-box">
-          <input
-            className="chat-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type message..."
-          />
-          <button className="btn" onClick={sendMessage}>Send</button>
+        <div className="controls-row">
+          <button className="btn" onClick={joinQueue}>Join</button>
+          <button className="btn" onClick={() => socketRef.current.emit("skip", roomRef.current)}>Skip</button>
+          <button className="btn red" onClick={cleanupCall}>Disconnect</button>
         </div>
+
       </div>
 
-      {/* Notes Panel */}
-      <div style={{ flex: 0.7 }} className="glass-card">
-        <h3>Notes</h3>
-        <ul>
-          <li>Allow camera & microphone when prompted.</li>
-          <li>TURNSERVER improves connection reliability.</li>
-          <li>Best on Chrome mobile & desktop.</li>
-        </ul>
+      {/* CHAT + NOTES */}
+      <div className="lower-section">
+
+        <div className="chat-area">
+          <h3>Chat</h3>
+
+          <div className="chat-panel">
+            {messages.map((m, i) => (
+              <div key={i} className={m.from === "me" ? "msg me" : "msg"}>
+                <div className="msg-text">{m.text}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="chat-input-box">
+            <input
+              className="chat-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type message..."
+            />
+            <button className="btn" onClick={sendMessage}>Send</button>
+          </div>
+        </div>
+
+        <div className="glass-card notes-card">
+          <h3>Notes</h3>
+          <ul>
+            <li>Allow camera & microphone access.</li>
+            <li>TURN improves connection reliability.</li>
+            <li>Best experience on Chrome mobile & desktop.</li>
+          </ul>
+        </div>
+
       </div>
     </div>
-  </div>
-);
-
+  );
 }
