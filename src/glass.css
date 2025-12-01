@@ -113,6 +113,15 @@ video {
   .lower-section {
     flex-direction: column;
   }
+  .app-logo{
+    margin-left: -1rem;
+    width: 150px;
+     
+  }
+  .app-title{
+    font-size: 25px;
+     text-align: center;
+  }
 }
 
 .chat-area {
