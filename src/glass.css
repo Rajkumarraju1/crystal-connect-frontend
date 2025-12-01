@@ -16,17 +16,20 @@ body {
 
 /* HEADER */
 .app-header {
-  text-align: center;
+  
   margin-bottom: 10px;
 }
 
 .app-logo {
-  width: 150px;
+  width: 190px;
+  margin-left: -10rem;
+  margin-top: -2rem;
+
 }
 
 .app-title {
   font-size: 32px;
-  margin-top: -10px;
+  margin-top: -2rem;
 }
 
 /* STATUS */
